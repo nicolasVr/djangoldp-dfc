@@ -22,9 +22,10 @@ def organization(number, products):
     return {"@context": settings.LDP_RDF_CONTEXT, "@graph": graph}
 
 
-def response(status, document=None):
+def response(status, document=None, empty=False):
     resp = mock.Mock()
     resp.status_code = status
+    resp.content = b"" if empty else b"{}"
     resp.json.return_value = document or {}
     if status >= 400:
         resp.raise_for_status.side_effect = requests.exceptions.HTTPError(response=resp)
@@ -92,6 +93,14 @@ class TestEndpointCleanup(TestCase):
 
         self.assertEqual(SuppliedProduct.objects.count(), 0)
         self.assertEqual(Organization.objects.count(), 1)
+
+    def test_empty_body_is_an_empty_import(self):
+        """OFN answers 200 with no body once the last enterprise has withdrawn access."""
+        refresh("organizations/1", response(200, organization(1, [1, 2])))
+        refresh("organizations/1", response(200, empty=True))
+
+        self.assertEqual(Organization.objects.count(), 0)
+        self.assertEqual(SuppliedProduct.objects.count(), 0)
 
     def test_forbidden_keeps_data_by_default(self):
         refresh("organizations/1", response(200, organization(1, [1, 2])))

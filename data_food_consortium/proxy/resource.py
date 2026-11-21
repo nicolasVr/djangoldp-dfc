@@ -592,7 +592,13 @@ class ResourceServerClient:
         headers = self._get_auth_headers_with_token_for_scope(scope)
         response = requests.get(endpoint, headers=headers)
         response.raise_for_status()
-        data = response.json()
+        # Some data-servers answer an empty body when nothing is granted any more (OFN
+        # renders nothing for an empty list). That is an empty import, not an error:
+        # with endpoint-scoped cleanup it discards what the endpoint used to return.
+        if not response.content.strip():
+            data = {"@graph": []}
+        else:
+            data = response.json()
 
         # Parse the returned graph, resolve and import to the relevant models.
         self.parser.parse(data)
