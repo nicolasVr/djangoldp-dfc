@@ -1172,6 +1172,30 @@ class ResourceImportRecord(models.Model):
         return result
 
 
+class EndpointImportState(models.Model):
+    """
+    What the last complete import of one data-server endpoint contained.
+
+    Used when DFC_PROXY_CLEANUP is "endpoint", to discard exactly the objects that an
+    endpoint no longer returns, without touching objects imported from other endpoints of
+    the same data-server.
+    """
+
+    endpoint = models.TextField(unique=True)
+    data_server = fields.ForeignKey(DataServer, on_delete=models.CASCADE)
+    subjects = models.TextField(
+        blank=True, default="", help_text="The proxied IRIs, one per line"
+    )
+    imported_at = models.DateTimeField()
+
+    def __str__(self):
+        return self.endpoint
+
+    @property
+    def subject_set(self):
+        return {line for line in self.subjects.splitlines() if line}
+
+
 class AbstractWebhookRecord(models.Model):
     completed_at = models.DateTimeField(auto_now_add=True)
     data = fields.JSONField(
