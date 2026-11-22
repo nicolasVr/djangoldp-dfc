@@ -1,4 +1,5 @@
 import logging
+import re
 import urllib
 import uuid
 
@@ -127,6 +128,72 @@ class ProxyRefreshParser:
 
         return None, None
 
+    def _has_resolvable_type(self, graph, subject):
+        """True when one of the subject's types maps to a DjangoLDP model, without logging."""
+        for type_uri in graph.objects(subject, RDF_TYPE_PREDICATE):
+            candidates = [str(type_uri)]
+            try:
+                candidates.append(graph.qname(type_uri))
+            except (ValueError, KeyError):
+                pass
+            if any(Model.get_subclass_with_rdf_type(c) is not None for c in candidates):
+                return True
+        return False
+
+    def skolemize_nested_blank_nodes(self, graph):
+        """
+        Give a stable IRI to blank nodes that describe a resource we store as a model.
+
+        Data servers commonly embed some resources without an @id, for instance a Price
+        inside an Offer: {"dfc-b:hasPrice": {"@type": "dfc-b:Price", "dfc-b:value": 10}}.
+        That is valid JSON-LD, but a blank node has no IRI within the data server's domain,
+        so it cannot become a proxied instance, and a single one used to abort the whole
+        import.
+
+        Each such node is renamed <parent IRI>#<predicate local name>, with a numeric
+        suffix when the same parent holds several of them under the same predicate. The
+        name only depends on the parent and on the node's content, so it is the same at
+        every import: re-importing updates the instance instead of duplicating it. It lies
+        within the parent's domain, so the usual annexation check still applies.
+
+        Blank nodes of unknown types (QuantitativeValue, PhoneNumber...) and blank nodes
+        with no IRI parent are left untouched, as before. Nested blank nodes are handled
+        from the outside in.
+        """
+        changed = True
+        while changed:
+            changed = False
+            names = {}
+            for node in sorted({s for s in graph.subjects() if isinstance(s, BNode)}, key=str):
+                if not self._has_resolvable_type(graph, node):
+                    continue
+                parents = sorted(
+                    (
+                        (parent, predicate)
+                        for parent, predicate in graph.subject_predicates(node)
+                        if isinstance(parent, URIRef)
+                    ),
+                    key=lambda pair: (str(pair[0]), str(pair[1])),
+                )
+                if not parents:
+                    continue
+                parent, predicate = parents[0]
+                local_name = re.split(r"[#/]", str(predicate))[-1] or "node"
+                content = sorted((str(p), str(o)) for p, o in graph.predicate_objects(node))
+                names.setdefault(f"{parent}#{local_name}", []).append((content, node))
+
+            for base, nodes in names.items():
+                nodes.sort(key=lambda item: item[0])
+                for index, (_content, node) in enumerate(nodes):
+                    iri = URIRef(base if len(nodes) == 1 else f"{base}-{index + 1}")
+                    for predicate, obj in list(graph.predicate_objects(node)):
+                        graph.remove((node, predicate, obj))
+                        graph.add((iri, predicate, obj))
+                    for subject, predicate in list(graph.subject_predicates(node)):
+                        graph.remove((subject, predicate, node))
+                        graph.add((subject, predicate, iri))
+                    changed = True
+
     def reformat_list_to_container(self, key, jsonld_data):
         if isinstance(jsonld_data, str):
             container = [{"@id": jsonld_data}]
@@ -222,6 +289,7 @@ class ProxyRefreshParser:
 
         graph = Graph()
         graph.parse(data=jsonld_data, format="json-ld")
+        self.skolemize_nested_blank_nodes(graph)
         subjects = set(graph.subjects())
 
         for subject in subjects:
