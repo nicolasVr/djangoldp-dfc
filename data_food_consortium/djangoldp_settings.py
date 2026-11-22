@@ -26,6 +26,18 @@ DFC_REQUESTED_SCOPES_DOCUMENT = (
 # granted access to by a data owner.
 DFC_USER_GRANTS_ENABLED = False
 
+# How a cache refresh decides which previously proxied objects to discard.
+# "domain" (default, historical behaviour): after each import, discard every object of the
+#   imported models, from the same data-server domain, that this import did not see.
+# "endpoint": discard only the objects that the previous import of the same endpoint saw
+#   and this one did not. Needed when one data-server exposes several endpoints for the
+#   same models (one per organization, for instance), and when a later import no longer
+#   contains a model at all (a scope was revoked).
+DFC_PROXY_CLEANUP = "domain"
+# With DFC_PROXY_CLEANUP = "endpoint": when an endpoint answers 403, discard what the
+# previous import of that endpoint brought, as the data owner has withdrawn access.
+DFC_PROXY_FORGET_ON_FORBIDDEN = False
+
 LDP_RDF_CONTEXT = (
     "https://cdn.jsdelivr.net/gh/datafoodconsortium/ontology/context/context_2.0.0.json"
 )

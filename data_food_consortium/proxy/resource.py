@@ -18,7 +18,7 @@ from data_food_consortium.enums import (
     ResourceImportFailure,
     ResourceImportSource,
 )
-from data_food_consortium.models import ResourceImportRecord
+from data_food_consortium.models import EndpointImportState, ResourceImportRecord
 from data_food_consortium.models_common import DataServer
 from data_food_consortium.proxy.errors import ResourceAnnexationError
 from data_food_consortium.proxy.keycloak import (
@@ -72,7 +72,14 @@ class ProxyRefreshParser:
         "dfc-b:collections",
     ]
 
-    def __init__(self, data_server_source, source: ResourceImportSource):
+    def __init__(self, data_server_source, source: ResourceImportSource, endpoint=None):
+        """
+        :param data_server_source: any IRI of the data-server; only its domain is kept
+        :param source: how the import was triggered
+        :param endpoint: the endpoint being read, when this is a cache refresh of one
+            endpoint. Required for DFC_PROXY_CLEANUP = "endpoint".
+        """
+        self.endpoint = endpoint
         dss = urllib.parse.urlparse(data_server_source)
         self.data_server_source_urlid = f"{dss.scheme}://{dss.netloc}"
         self.data_server_source = Model.get_or_create(
@@ -478,15 +485,75 @@ class ProxyRefreshParser:
             updated_at__lt=self.import_started_at,
             data_server_source__urlid__startswith=self.data_server_source_urlid,
         )
+        # An update webhook carries only the resources that changed: it says nothing about
+        # the others, so it must not discard them. Neither does an endpoint-scoped refresh,
+        # whose discarding happens once the whole endpoint is read (finish_endpoint).
+        sweep_unseen = (
+            self.source != ResourceImportSource.UPDATE_WEBHOOK
+            and getattr(settings, "DFC_PROXY_CLEANUP", "domain") != "endpoint"
+        )
+        condition = (
+            ldp_serializer_created | missing_from_new_import
+            if sweep_unseen
+            else ldp_serializer_created
+        )
 
         for imported_model in self.imported_models:
-            deleted = imported_model.objects.filter(
-                ldp_serializer_created | missing_from_new_import
-            )
+            deleted = imported_model.objects.filter(condition)
             self.deleted_subjects += [d.proxy_of for d in deleted]
             deleted.delete()
             logger.info(
                 f"Deleted {deleted} instances of {imported_model} during cleanup on data source {self.data_server_source_urlid}"
+            )
+
+    @staticmethod
+    def _proxied_models():
+        from django.apps import apps
+
+        return [
+            model
+            for model in apps.get_app_config("data_food_consortium").get_models()
+            if any(f.name == "proxy_of" for f in model._meta.concrete_fields)
+            and any(f.name == "data_server_source" for f in model._meta.concrete_fields)
+        ]
+
+    def _discard(self, subjects):
+        """Delete the proxied instances of these IRIs that came from this data-server."""
+        if not subjects:
+            return
+        for model in self._proxied_models():
+            stale = model.objects.filter(
+                proxy_of__in=subjects, data_server_source=self.data_server_source
+            )
+            self.deleted_subjects += [d.proxy_of for d in stale]
+            stale.delete()
+
+    def finish_endpoint(self, reachable=True):
+        """
+        After every page of an endpoint was read, discard what the previous import of this
+        endpoint had and this one no longer has. With reachable=False (the endpoint
+        refused access), discard everything the previous import had.
+
+        Only acts when DFC_PROXY_CLEANUP is "endpoint" and the endpoint is known.
+        """
+        if getattr(settings, "DFC_PROXY_CLEANUP", "domain") != "endpoint" or not self.endpoint:
+            return
+        with transaction.atomic():
+            state = EndpointImportState.objects.filter(endpoint=self.endpoint).first()
+            previous = state.subject_set if state is not None else set()
+            current = set(self.imported_subjects) if reachable else set()
+            self._discard(previous - current)
+            EndpointImportState.objects.update_or_create(
+                endpoint=self.endpoint,
+                defaults={
+                    "data_server": self.data_server_source,
+                    "subjects": "\n".join(sorted(current)),
+                    "imported_at": self.import_started_at,
+                },
+            )
+        if self.deleted_subjects:
+            logger.info(
+                f"Discarded {len(self.deleted_subjects)} subjects no longer served by {self.endpoint}"
             )
 
     def create_record(self):
@@ -593,7 +660,13 @@ class ResourceServerClient:
         headers = self._get_auth_headers_with_token_for_scope(scope)
         response = requests.get(endpoint, headers=headers)
         response.raise_for_status()
-        data = response.json()
+        # Some data-servers answer an empty body when nothing is granted any more (OFN
+        # renders nothing for an empty list). That is an empty import, not an error:
+        # with endpoint-scoped cleanup it discards what the endpoint used to return.
+        if not response.content.strip():
+            data = {"@graph": []}
+        else:
+            data = response.json()
 
         # Parse the returned graph, resolve and import to the relevant models.
         self.parser.parse(data)
@@ -611,5 +684,12 @@ class ResourceServerClient:
         """
         # Each scope has an associated endpoint.
         endpoint = f"{self.dataserver_url}{self.scope_config[scope]}"
-        self.parser = ProxyRefreshParser(endpoint, self.source)
-        self._request_and_process_scope_at_endpoint(scope, endpoint)
+        self.parser = ProxyRefreshParser(endpoint, self.source, endpoint=endpoint)
+        try:
+            self._request_and_process_scope_at_endpoint(scope, endpoint)
+        except requests.exceptions.HTTPError as e:
+            forbidden = e.response is not None and e.response.status_code == 403
+            if forbidden and getattr(settings, "DFC_PROXY_FORGET_ON_FORBIDDEN", False):
+                self.parser.finish_endpoint(reachable=False)
+            raise
+        self.parser.finish_endpoint()
