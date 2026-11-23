@@ -76,9 +76,15 @@ class WebhookProcessor:
     def process_update(self):
         # Parse and import the graph.
         # TODO: trigger optional behaviour in the parser to fail loudly.
+        # An update webhook pushes the document rather than serving it at a URL, so the
+        # document has no base IRI of its own. The data-server's urlid is the only safe
+        # base: relative IRIs then resolve inside the data-server's domain (the
+        # annexation check still rejects anything outside it) and to the IRIs the
+        # data-server itself would resolve them to. Using our own webhook URL instead
+        # would annex the resources to us.
         ProxyRefreshParser(
             self.data_server.urlid, ResourceImportSource.UPDATE_WEBHOOK
-        ).parse(self.data)
+        ).parse(self.data, base_iri=self.data_server.urlid)
 
     def process_refresh(self):
         host = urlparse(self.data_server.urlid)
