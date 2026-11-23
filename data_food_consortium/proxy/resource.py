@@ -10,7 +10,7 @@ from django.db.models import Q
 from django.utils import timezone
 from djangoldp import fields
 from djangoldp.models import Model
-from rdflib import BNode, Graph, URIRef
+from rdflib import BNode, Graph, Literal, URIRef
 from rdflib.exceptions import ParserError
 
 from data_food_consortium.enums import (
@@ -28,6 +28,34 @@ from data_food_consortium.proxy.keycloak import (
 from data_food_consortium.utils import get_serializer_class
 
 RDF_TYPE_PREDICATE = URIRef("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
+
+# Characters which no IRI reference may contain (RFC 3987, section 2.2).
+_IRI_REFERENCE_FORBIDDEN_CHARACTERS = set(' <>"{}|\\^`')
+
+
+def _resolve_iri_reference(value, base_iri):
+    """
+    The absolute IRI designated by a literal relation value, or None if it is no IRI
+    reference.
+
+    Open Food Network's DFC v1 endpoint (/api/dfc/enterprises, context 1.16.0) sends
+    dfc-b:isCertifiedBy as the literal "#certification-4" rather than as an @id: its
+    connector registers certifications as a semantic property holding strings, and the
+    1.16 context does not type dfc-b:isCertifiedBy as @id. Accept it as the IRI
+    reference it means, resolved against the base IRI of the document it was read from.
+    """
+    if base_iri is None:
+        return None
+    value = value.strip()
+    if not value or any(
+        character in _IRI_REFERENCE_FORBIDDEN_CHARACTERS or character.isspace()
+        for character in value
+    ):
+        return None
+    resolved = urllib.parse.urljoin(base_iri, value)
+    if not urllib.parse.urlsplit(resolved).scheme:
+        return None
+    return resolved
 
 
 logger = logging.getLogger(__name__)
@@ -286,23 +314,56 @@ class ProxyRefreshParser:
                 continue
         return None
 
-    def _relationship_iris(self, graph, subject, rdf_type, parsed_value):
+    @classmethod
+    def _relation_iris(cls, graph, subject, rdf_type, base_iri):
         """
-        The IRIs of a relationship of a one-to-many field. A data-server sends them either
-        in an ldp:Container, which _do_parse already turns into a list, or as one or
-        several objects sharing the predicate, of which _do_parse keeps only the last
-        value: read those from the graph instead.
+        The IRIs a relation points to, read from the graph, or None when the subject has
+        no such predicate.
+
+        An IRI object is already resolved by the parser. A literal is read as an IRI
+        reference resolved against the document base (see _resolve_iri_reference): it is
+        the form Open Food Network uses for dfc-b:isCertifiedBy. A literal which is no
+        IRI reference at all is ignored.
+        """
+        predicate = cls._predicate_iri(graph, subject, rdf_type)
+        if predicate is None:
+            return None
+        iris = []
+        for obj in graph.objects(subject, predicate):
+            if isinstance(obj, URIRef):
+                iris.append(str(obj))
+            elif isinstance(obj, Literal):
+                iri = _resolve_iri_reference(str(obj), base_iri)
+                if iri is not None:
+                    iris.append(iri)
+        return iris
+
+    def _relationship_iris(self, graph, subject, rdf_type, parsed_value, base_iri):
+        """
+        The IRIs of a one-to-many relationship.
+
+        A data-server sends them either in an ldp:Container, which _do_parse already
+        turns into a list, or as objects sharing the predicate, of which _do_parse keeps
+        only the last value: read those from the graph instead. Literal values are IRI
+        references relative to the document (see _relation_iris).
         """
         if not isinstance(parsed_value, str):
             return parsed_value
-        predicate = self._predicate_iri(graph, subject, rdf_type)
-        if predicate is None:
-            return [parsed_value]
-        return [
-            str(obj)
-            for obj in graph.objects(subject, predicate)
-            if isinstance(obj, URIRef)
-        ]
+        iris = self._relation_iris(graph, subject, rdf_type, base_iri)
+        return [parsed_value] if iris is None else iris
+
+    def _relationship_iri(self, graph, subject, rdf_type, parsed_value, base_iri):
+        """
+        The IRI of a single-valued relationship, or None when its value designates no
+        IRI. An IRI object is already resolved by the parser; a literal is an IRI
+        reference to resolve against the document base (see _relation_iris).
+        """
+        if not isinstance(parsed_value, str):
+            return None
+        iris = self._relation_iris(graph, subject, rdf_type, base_iri)
+        if iris is None:
+            return parsed_value
+        return iris[-1] if iris else None
 
     def _recursively_force_data_server_source(self, value):
         if isinstance(value, dict):
@@ -448,7 +509,11 @@ class ProxyRefreshParser:
                         continue
                     if field.one_to_many or field.many_to_many:
                         related_iris = self._relationship_iris(
-                            graph, subject, rdf_type, source_data.pop(rdf_type)
+                            graph,
+                            subject,
+                            rdf_type,
+                            source_data.pop(rdf_type),
+                            base_iri,
                         )
                         resource_data[field.name] = {
                             "@type": "ldp:Container",
@@ -458,8 +523,17 @@ class ProxyRefreshParser:
                             ],
                         }
                     else:
+                        related_iri = self._relationship_iri(
+                            graph,
+                            subject,
+                            rdf_type,
+                            source_data.pop(rdf_type),
+                            base_iri,
+                        )
+                        if related_iri is None:
+                            continue
                         resource_data[field.name] = self._serialize_related_instance(
-                            field, instance, source_data.pop(rdf_type)
+                            field, instance, related_iri
                         )
                 else:
                     resource_data[field.name] = source_data.pop(rdf_type)
