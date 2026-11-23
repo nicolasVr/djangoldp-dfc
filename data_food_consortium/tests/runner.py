@@ -26,6 +26,7 @@ failures = test_runner.run_tests(
         "data_food_consortium.tests.test_proxy_blank_nodes",
         "data_food_consortium.tests.test_proxy_cleanup",
         "data_food_consortium.tests.test_proxy_literal_relation_iris",
+        "data_food_consortium.tests.test_proxy_ofn_certifications",
         "data_food_consortium.tests.test_proxy_relative_iris",
         "data_food_consortium.tests.test_proxy_to_many_values",
         "data_food_consortium.tests.test_webhooks",
