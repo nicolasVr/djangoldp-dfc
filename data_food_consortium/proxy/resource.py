@@ -216,12 +216,15 @@ class ProxyRefreshParser:
                     value[i] = self._recursively_force_data_server_source(value[i])
         return value
 
-    def _do_parse(self, jsonld_data):
+    def _do_parse(self, jsonld_data, base_iri):
         jsonld_data = self.transform_dfc_v1(jsonld_data)
         self._cache_data_batch(jsonld_data)
 
         graph = Graph()
-        graph.parse(data=jsonld_data, format="json-ld")
+        # RDFLib resolves relative IRIs against the base IRI, or against the current
+        # directory when none is given: only pass a base when we have one.
+        parse_kwargs = {"base": base_iri} if base_iri else {}
+        graph.parse(data=jsonld_data, format="json-ld", **parse_kwargs)
         subjects = set(graph.subjects())
 
         for subject in subjects:
@@ -389,9 +392,20 @@ class ProxyRefreshParser:
         self.clean_up()
         self.create_record()
 
-    def parse(self, jsonld_data):
+    def parse(self, jsonld_data, base_iri=None):
+        """
+        Parses and imports one JSON-LD document.
+
+        :param base_iri: the base IRI against which the document's relative IRIs resolve.
+            For a fetched document this is the URL it was fetched from; for a pushed
+            document (update webhook) it is the data-server's urlid, because a pushed
+            document has no URL of its own. Relative IRIs then resolve inside the
+            data-server's domain, so the annexation check still applies to them. A
+            document declaring its own @base keeps precedence, as JSON-LD requires.
+            Without a base IRI, relative IRIs stay unresolved (previous behaviour).
+        """
         with transaction.atomic():
-            self._do_parse(jsonld_data)
+            self._do_parse(jsonld_data, base_iri)
 
     def clean_up(self):
         """
@@ -528,7 +542,9 @@ class ResourceServerClient:
         data = response.json()
 
         # Parse the returned graph, resolve and import to the relevant models.
-        self.parser.parse(data)
+        # The URL of this page is the document's base IRI: it is what the data-server's
+        # relative IRIs (e.g. "#certification-4") are meant to resolve against.
+        self.parser.parse(data, base_iri=endpoint)
 
         # If there is more data, continue.
         if "next" in data and data["next"] is not None:
