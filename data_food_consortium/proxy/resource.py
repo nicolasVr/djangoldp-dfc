@@ -270,6 +270,40 @@ class ProxyRefreshParser:
             "allow_create_backlink": False,
         }
 
+    @staticmethod
+    def _predicate_iri(graph, subject, rdf_type):
+        """
+        The predicate of the graph which matches a configured rdf_type, which may be
+        expressed in expanded or in compacted form.
+        """
+        for predicate in graph.predicates(subject):
+            if str(predicate) == rdf_type:
+                return predicate
+            try:
+                if graph.qname(predicate) == rdf_type:
+                    return predicate
+            except (ValueError, KeyError):
+                continue
+        return None
+
+    def _relationship_iris(self, graph, subject, rdf_type, parsed_value):
+        """
+        The IRIs of a relationship of a one-to-many field. A data-server sends them either
+        in an ldp:Container, which _do_parse already turns into a list, or as one or
+        several objects sharing the predicate, of which _do_parse keeps only the last
+        value: read those from the graph instead.
+        """
+        if not isinstance(parsed_value, str):
+            return parsed_value
+        predicate = self._predicate_iri(graph, subject, rdf_type)
+        if predicate is None:
+            return [parsed_value]
+        return [
+            str(obj)
+            for obj in graph.objects(subject, predicate)
+            if isinstance(obj, URIRef)
+        ]
+
     def _recursively_force_data_server_source(self, value):
         if isinstance(value, dict):
             if (
@@ -413,11 +447,14 @@ class ProxyRefreshParser:
                         )
                         continue
                     if field.one_to_many or field.many_to_many:
+                        related_iris = self._relationship_iris(
+                            graph, subject, rdf_type, source_data.pop(rdf_type)
+                        )
                         resource_data[field.name] = {
                             "@type": "ldp:Container",
                             "ldp:contains": [
                                 self._serialize_related_instance(field, instance, x)
-                                for x in source_data.pop(rdf_type)
+                                for x in related_iris
                             ],
                         }
                     else:
