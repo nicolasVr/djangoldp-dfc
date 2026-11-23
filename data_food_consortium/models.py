@@ -1091,6 +1091,9 @@ class Certification(AbstractDFCModel):
 
     class Meta(AbstractDFCModel.Meta):
         rdf_type = "dfc-b:Certification"
+        # The DFC ontology itself spells the class "Certfication" (typo kept in
+        # DFC_BusinessOntology.owl), and Open Food Network's connector emits it as such.
+        other_rdf_types = ["dfc-b:Certfication"]
         serializer_fields = [
             "@id",
             "proxy_of",
