@@ -44,7 +44,9 @@ class KeycloakClient:
             "scope": self.scopes,
         }
 
-        response = requests.post(settings.KEYCLOAK_URL, data=payload)
+        response = requests.post(
+            settings.KEYCLOAK_URL, data=payload, timeout=settings.DFC_HTTP_TIMEOUT
+        )
 
         if response.status_code == 200:
             return response.json()["access_token"]
@@ -65,7 +67,7 @@ class KeycloakResourceServerAuthentication(BaseAuthentication):
         :raises authlib.jose.JoseError: if token or claims are invalid
         """
         url = f"{os.getenv('KEYCLOAK_URL')}/realms/{os.getenv('KEYCLOAK_REALM')}/protocol/openid-connect/certs"
-        jwks_data = requests.get(url).json()
+        jwks_data = requests.get(url, timeout=settings.DFC_HTTP_TIMEOUT).json()
         claims = authlib_jwt.decode(
             encoded_token,
             jwks_data,
