@@ -454,7 +454,9 @@ class ResourceServerClient:
         self.scope_config = settings.DFC_KEYCLOAK_READ_SCOPES.copy()
 
         discovery_endpoint = f"{self.dataserver_url}.well-known/dfc/"
-        response = requests.get(discovery_endpoint)
+        response = requests.get(
+            discovery_endpoint, timeout=settings.DFC_HTTP_TIMEOUT
+        )
         if response.status_code == 200:
             data_server_endpoints = response.json()
             for full, short in PermissioningScope.short_values_mapping.items():
@@ -523,7 +525,9 @@ class ResourceServerClient:
         scraping all available data until complete.
         """
         headers = self._get_auth_headers_with_token_for_scope(scope)
-        response = requests.get(endpoint, headers=headers)
+        response = requests.get(
+            endpoint, headers=headers, timeout=settings.DFC_HTTP_TIMEOUT
+        )
         response.raise_for_status()
         data = response.json()
 

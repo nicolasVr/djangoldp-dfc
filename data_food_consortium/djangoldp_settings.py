@@ -26,6 +26,12 @@ DFC_REQUESTED_SCOPES_DOCUMENT = (
 # granted access to by a data owner.
 DFC_USER_GRANTS_ENABLED = False
 
+# Deadline of every outgoing HTTP request, in seconds: Keycloak token and JWKS endpoints,
+# data-server discovery and scope reads. Without it a data-server which accepts the
+# connection and never answers blocks the caller for ever; with it the request fails, and
+# the caller logs the network error (ResourceImportFailure.NETWORK_ERROR) as usual.
+DFC_HTTP_TIMEOUT = 30
+
 LDP_RDF_CONTEXT = (
     "https://cdn.jsdelivr.net/gh/datafoodconsortium/ontology/context/context_2.0.0.json"
 )
